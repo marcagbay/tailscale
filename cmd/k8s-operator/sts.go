@@ -38,9 +38,10 @@ const (
 	FinalizerName = "tailscale.com/finalizer"
 
 	// Annotations settable by users on services.
-	AnnotationExpose   = "tailscale.com/expose"
-	AnnotationTags     = "tailscale.com/tags"
-	AnnotationHostname = "tailscale.com/hostname"
+	AnnotationExpose          = "tailscale.com/expose"
+	AnnotationTags            = "tailscale.com/tags"
+	AnnotationHostname        = "tailscale.com/hostname"
+	AnnotationTailnetTargetIP = "tailscale.com/target-ip"
 
 	// Annotations settable by users on ingresses.
 	AnnotationFunnel = "tailscale.com/funnel"
@@ -57,7 +58,11 @@ type tailscaleSTSConfig struct {
 	ChildResourceLabels map[string]string
 
 	ServeConfig *ipn.ServeConfig
-	TargetIP    string
+	// Tailscale target in cluster we are setting up ingress for
+	ClusterTargetIP string
+
+	// Tailscale IP of a Tailscale service we are setting up egress for
+	TailscaleTargetIP string
 
 	Hostname string
 	Tags     []string // if empty, use defaultTags
@@ -74,23 +79,23 @@ type tailscaleSTSReconciler struct {
 
 // Provision ensures that the StatefulSet for the given service is running and
 // up to date.
-func (a *tailscaleSTSReconciler) Provision(ctx context.Context, logger *zap.SugaredLogger, sts *tailscaleSTSConfig) error {
+func (a *tailscaleSTSReconciler) Provision(ctx context.Context, logger *zap.SugaredLogger, sts *tailscaleSTSConfig) (*corev1.Service, error) {
 	// Do full reconcile.
 	hsvc, err := a.reconcileHeadlessService(ctx, logger, sts)
 	if err != nil {
-		return fmt.Errorf("failed to reconcile headless service: %w", err)
+		return nil, fmt.Errorf("failed to reconcile headless service: %w", err)
 	}
 
 	secretName, err := a.createOrGetSecret(ctx, logger, sts, hsvc)
 	if err != nil {
-		return fmt.Errorf("failed to create or get API key secret: %w", err)
+		return nil, fmt.Errorf("failed to create or get API key secret: %w", err)
 	}
 	_, err = a.reconcileSTS(ctx, logger, sts, hsvc, secretName)
 	if err != nil {
-		return fmt.Errorf("failed to reconcile statefulset: %w", err)
+		return nil, fmt.Errorf("failed to reconcile statefulset: %w", err)
 	}
 
-	return nil
+	return hsvc, nil
 }
 
 // Cleanup removes all resources associated that were created by Provision with
@@ -299,11 +304,17 @@ func (a *tailscaleSTSReconciler) reconcileSTS(ctx context.Context, logger *zap.S
 			Name:  "TS_HOSTNAME",
 			Value: sts.Hostname,
 		})
-	if sts.TargetIP != "" {
+	if sts.ClusterTargetIP != "" {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "TS_DEST_IP",
-			Value: sts.TargetIP,
+			Value: sts.ClusterTargetIP,
 		})
+	} else if sts.TailscaleTargetIP != "" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "TS_EGRESS_IP",
+			Value: sts.TailscaleTargetIP,
+		})
+
 	} else if sts.ServeConfig != nil {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "TS_SERVE_CONFIG",
@@ -346,8 +357,8 @@ func (a *tailscaleSTSReconciler) reconcileSTS(ctx context.Context, logger *zap.S
 	ss.Spec.Template.Annotations = map[string]string{
 		"tailscale.com/operator-last-set-hostname": sts.Hostname,
 	}
-	if sts.TargetIP != "" {
-		ss.Spec.Template.Annotations["tailscale.com/operator-last-set-ip"] = sts.TargetIP
+	if sts.ClusterTargetIP != "" {
+		ss.Spec.Template.Annotations["tailscale.com/operator-last-set-ip"] = sts.ClusterTargetIP
 	}
 	ss.Spec.Template.Labels = map[string]string{
 		"app": sts.ParentResourceUID,
