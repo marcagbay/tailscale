@@ -637,6 +637,13 @@ func (a *ServiceReconciler) reconcileSTS(ctx context.Context, logger *zap.Sugare
 				Name:  "TS_EGRESS_IP",
 				Value: ip,
 			},
+			corev1.EnvVar{
+				// Egress might need to be able to resolve Tailscale DNS -
+				// probably ok to make the proxy always pull DNS config from
+				// control if it's an egress proxy?
+				Name:  "TS_ACCEPT_DNS",
+				Value: "true",
+			},
 		)
 	} else {
 		container.Env = append(container.Env,
