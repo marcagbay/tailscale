@@ -266,17 +266,22 @@ authLoop:
 			log.Fatalf("tailscaled left running state (now in state %q), exiting", *n.State)
 		}
 		if n.NetMap != nil {
-			if cfg.IngressProxyTo != "" && len(n.NetMap.Addresses) > 0 && deephash.Update(&currentIPs, &n.NetMap.Addresses) {
+			newCurrentIPs := deephash.Hash(&n.NetMap.Addresses)
+			ipsHaveChanged := newCurrentIPs != currentIPs
+			if cfg.IngressProxyTo != "" && len(n.NetMap.Addresses) > 0 && ipsHaveChanged {
 				if err := installIngressForwardingRule(ctx, cfg.IngressProxyTo, n.NetMap.Addresses); err != nil {
-					log.Fatalf("installing proxy rules: %v", err)
+					log.Fatalf("installing ingress proxy rules: %v", err)
 				}
 			}
-			if cfg.EgressProxyTo != "" && !installedEgressProxy {
-				if err := installEgressForwardingRule(ctx, cfg.EgressProxyTo); err != nil {
-					log.Fatalf("installing proxy rules: %v", err)
+			// TODO (irbekrm): check if destination IP changes (i.e user made a typo & later corrected)
+			if cfg.EgressProxyTo != "" && !installedEgressProxy && len(n.NetMap.Addresses) > 0 && ipsHaveChanged {
+				if err := installEgressForwardingRule(ctx, cfg.EgressProxyTo, n.NetMap.Addresses); err != nil {
+					log.Fatalf("installing egress proxy rules: %v", err)
 				}
 				installedEgressProxy = true
 			}
+			currentIPs = newCurrentIPs
+
 			deviceInfo := []any{n.NetMap.SelfNode.StableID, n.NetMap.SelfNode.Name}
 			if cfg.InKubernetes && cfg.KubernetesCanPatch && cfg.KubeSecret != "" && deephash.Update(&currentDeviceInfo, &deviceInfo) {
 				if err := storeDeviceInfo(ctx, cfg.KubeSecret, n.NetMap.SelfNode.StableID, n.NetMap.SelfNode.Name); err != nil {
@@ -503,7 +508,7 @@ func ensureIPForwarding(root, proxyTo, routes string) error {
 	return nil
 }
 
-func installEgressForwardingRule(ctx context.Context, dstStr string) error {
+func installEgressForwardingRule(ctx context.Context, dstStr string, tsIPs []netip.Prefix) error {
 	dst, err := netip.ParseAddr(dstStr)
 	if err != nil {
 		return err
@@ -512,14 +517,39 @@ func installEgressForwardingRule(ctx context.Context, dstStr string) error {
 	if dst.Is6() {
 		argv0 = "ip6tables"
 	}
+	var local string
+	for _, pfx := range tsIPs {
+		if !pfx.IsSingleIP() {
+			continue
+		}
+		if pfx.Addr().Is4() != dst.Is4() {
+			continue
+		}
+		local = pfx.Addr().String()
+		break
+	}
+	if local == "" {
+		return fmt.Errorf("no tailscale IP matching family of %s found in %v", dstStr, tsIPs)
+	}
 	// Technically, if the control server ever changes the IPs assigned to this
 	// node, we'll slowly accumulate iptables rules. This shouldn't happen, so
 	// for now we'll live with it.
-	cmd := exec.CommandContext(ctx, argv0, "-t", "nat", "-I", "PREROUTING", "1", "!", "-i", "tailscale0", "-j", "DNAT", "--to-destination", dstStr)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	// Set up a rule that ensures that all packets
+	// except for those received on tailscale0 interface is forwarded to
+	// destination address
+	cmdDNAT := exec.CommandContext(ctx, argv0, "-t", "nat", "-I", "PREROUTING", "1", "!", "-i", "tailscale0", "-j", "DNAT", "--to-destination", dstStr)
+	cmdDNAT.Stdout = os.Stdout
+	cmdDNAT.Stderr = os.Stderr
+	if err := cmdDNAT.Run(); err != nil {
 		return fmt.Errorf("executing iptables failed: %w", err)
+	}
+	// Set up a rule that ensures that all packets sent to the destination
+	// address will have the proxy's IP set as source IP
+	cmdSNAT := exec.CommandContext(ctx, argv0, "-t", "nat", "-A", "POSTROUTING", "--destination", dstStr, "-j", "SNAT", "--to-source", local)
+	cmdSNAT.Stdout = os.Stdout
+	cmdSNAT.Stderr = os.Stderr
+	if err := cmdSNAT.Run(); err != nil {
+		return fmt.Errorf("setting up SNAT via iptables failed: %w", err)
 	}
 	return nil
 }
