@@ -45,6 +45,8 @@ type setArgsT struct {
 	acceptedRisks          string
 	profileName            string
 	forceDaemon            bool
+	updateCheck            bool
+	updateApply            bool
 }
 
 func newSetFlagSet(goos string, setArgs *setArgsT) *flag.FlagSet {
@@ -60,6 +62,8 @@ func newSetFlagSet(goos string, setArgs *setArgsT) *flag.FlagSet {
 	setf.StringVar(&setArgs.hostname, "hostname", "", "hostname to use instead of the one provided by the OS")
 	setf.StringVar(&setArgs.advertiseRoutes, "advertise-routes", "", "routes to advertise to other nodes (comma-separated, e.g. \"10.0.0.0/8,192.168.0.0/24\") or empty string to not advertise routes")
 	setf.BoolVar(&setArgs.advertiseDefaultRoute, "advertise-exit-node", false, "offer to be an exit node for internet traffic for the tailnet")
+	setf.BoolVar(&setArgs.updateCheck, "update-check", true, "HIDDEN: automatically check for available Tailscale updates")
+	setf.BoolVar(&setArgs.updateApply, "update-apply", false, "HIDDEN: automatically update to the latest available version as soon as it's available")
 	if safesocket.GOOSUsesPeerCreds(goos) {
 		setf.StringVar(&setArgs.opUser, "operator", "", "Unix username to allow to operate on tailscaled without sudo")
 	}
@@ -98,6 +102,10 @@ func runSet(ctx context.Context, args []string) (retErr error) {
 			Hostname:               setArgs.hostname,
 			OperatorUser:           setArgs.opUser,
 			ForceDaemon:            setArgs.forceDaemon,
+			AutoUpdate: ipn.AutoUpdatePrefs{
+				Check: setArgs.updateCheck,
+				Apply: setArgs.updateApply,
+			},
 		},
 	}
 

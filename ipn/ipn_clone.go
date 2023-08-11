@@ -50,6 +50,7 @@ var _PrefsCloneNeedsRegeneration = Prefs(struct {
 	NetfilterMode          preftype.NetfilterMode
 	OperatorUser           string
 	ProfileName            string
+	AutoUpdate             AutoUpdatePrefs
 	Persist                *persist.Persist
 }{})
 
