@@ -4,6 +4,7 @@
 package controlclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -640,6 +641,54 @@ func TestDeltaDERPMap(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPeerChangeDiff(t *testing.T) {
+	tests := []struct {
+		name      string
+		a, b      *tailcfg.Node
+		want      *tailcfg.PeerChange // nil means want ok=false, unless wantEqual is set
+		wantEqual bool                // means test wants (nil, true)
+	}{
+		{
+			name:      "eq",
+			a:         &tailcfg.Node{ID: 1},
+			b:         &tailcfg.Node{ID: 1},
+			wantEqual: true,
+		},
+		{
+			name: "fail",
+			a:    &tailcfg.Node{ID: 1},
+			b:    &tailcfg.Node{ID: 1, StableID: "diff"},
+			want: nil,
+		},
+		{
+			name: "patch-derp",
+			a:    &tailcfg.Node{ID: 1},
+			b:    &tailcfg.Node{ID: 1, DERP: "127.3.3.40:10"},
+			want: &tailcfg.PeerChange{NodeID: 1, DERPRegion: 10},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pc, ok := peerChangeDiff(tt.a.View(), tt.b)
+			if tt.wantEqual {
+				if !ok || pc != nil {
+					t.Errorf("got (%p, %v); want (nil, true); pc=%v", pc, ok, must.Get(json.Marshal(pc)))
+				}
+				return
+			}
+			if (pc != nil) != ok {
+				t.Fatalf("inconsistent ok=%v, pc=%p", ok, pc)
+			}
+			gotj := must.Get(json.Marshal(pc))
+			wantj := must.Get(json.Marshal(tt.want))
+			if !bytes.Equal(gotj, wantj) {
+				t.Errorf("mismatch\n got: %s\nwant: %s\n", gotj, wantj)
+			}
+		})
+	}
+
 }
 
 type countingNetmapUpdater struct {

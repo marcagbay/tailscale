@@ -263,6 +263,22 @@ func (v Slice[T]) ContainsFunc(f func(T) bool) bool {
 	return false
 }
 
+// SliceEqual reports whether a and b are the same length and a.At(i) == b.At(i)
+// for all i in [0, a.Len()).
+//
+// If both are length zero, it reports whether their nilness matches.
+func SliceEqual[T comparable](a, b Slice[T]) bool {
+	if a.Len() != b.Len() || a.IsNil() != b.IsNil() {
+		return false
+	}
+	for i, av := range a.ж {
+		if av != b.ж[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // SliceContains reports whether v contains element e.
 //
 // As it runs in O(n) time, use with care.

@@ -4,10 +4,17 @@
 package controlclient
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
+	"net"
 	"net/netip"
+	"reflect"
+	"slices"
 	"sort"
+	"strconv"
 
 	"tailscale.com/envknob"
 	"tailscale.com/tailcfg"
@@ -182,6 +189,20 @@ func (ms *mapSession) HandleNonKeepAliveMapResponse(ctx context.Context, resp *t
 
 	// Call Node.InitDisplayNames on any changed nodes.
 	initDisplayNames(cmpx.Or(resp.Node.View(), ms.lastNode), resp)
+
+	ms.patchifyPeersChanged(resp)
+	log.Printf("XXX resclass:%v", logger.ArgWriter(func(bw *bufio.Writer) {
+		rv := reflect.ValueOf(resp).Elem()
+		rt := rv.Type()
+		for i := 0; i < rt.NumField(); i++ {
+			f := rv.Field(i)
+			if f.IsZero() {
+				continue
+			}
+			sf := rt.Field(i)
+			fmt.Fprintf(bw, " %s", sf.Name)
+		}
+	}))
 
 	ms.updateStateFromResponse(resp)
 
@@ -426,6 +447,196 @@ func (ms *mapSession) addUserProfile(nm *netmap.NetworkMap, userID tailcfg.UserI
 	if up, ok := ms.lastUserProfile[userID]; ok {
 		nm.UserProfiles[userID] = up
 	}
+}
+
+// patchifyPeersChanged mutates resp to promote PeersChanged entries to PeersChangedPatch
+// when possible.
+func (ms *mapSession) patchifyPeersChanged(resp *tailcfg.MapResponse) {
+	filtered := resp.PeersChanged[:0]
+	for _, n := range resp.PeersChanged {
+		if p, ok := ms.patchifyPeer(n); ok {
+			patchj, _ := json.Marshal(p)
+			ms.logf("XXX patchified[ID=%v]: %s", n.ID, patchj)
+			if p != nil {
+				resp.PeersChangedPatch = append(resp.PeersChangedPatch, p)
+			}
+		} else {
+			filtered = append(filtered, n)
+		}
+	}
+	resp.PeersChanged = filtered
+	if len(resp.PeersChanged) == 0 {
+		resp.PeersChanged = nil
+	}
+}
+
+var nodeType = reflect.TypeOf((*tailcfg.Node)(nil)).Elem()
+
+// patchifyPeer returns a *tailcfg.PeerChange of the session's existing copy of
+// the n.ID Node to n.
+//
+// It returns ok=false if a patch can't be made, (V, ok) on a delta, or (nil,
+// true) if all the fields were identical (a zero change).
+func (ms *mapSession) patchifyPeer(n *tailcfg.Node) (_ *tailcfg.PeerChange, ok bool) {
+	was, ok := ms.peers[n.ID]
+	if !ok {
+		return nil, false
+	}
+	return peerChangeDiff(*was, n)
+}
+
+// peerChangeDiff returns the difference from 'was' to 'n', if possible.
+//
+// It returns (nil, true) if the fields were identical.
+func peerChangeDiff(was tailcfg.NodeView, n *tailcfg.Node) (_ *tailcfg.PeerChange, ok bool) {
+	var pc tailcfg.PeerChange
+	for i, numField := 0, nodeType.NumField(); i < numField; i++ {
+		f := nodeType.Field(i)
+		switch f.Name {
+		default:
+			// The whole point of using reflect in this function is to panic
+			// here in tests if we forget to handle a new field.
+			panic("unhandled field: " + f.Name)
+		case "computedHostIfDifferent", "ComputedName", "ComputedNameWithHost":
+			// Caller's responsibility to have populated these.
+			continue
+		case "DataPlaneAuditLogID":
+			//  Not sent for peers.
+		case "ID":
+			if was.ID() != n.ID {
+				return nil, false
+			}
+		case "StableID":
+			if was.StableID() != n.StableID {
+				return nil, false
+			}
+		case "Name":
+			if was.Name() != n.Name {
+				return nil, false
+			}
+		case "User":
+			if was.User() != n.User {
+				return nil, false
+			}
+		case "Sharer":
+			if was.Sharer() != n.Sharer {
+				return nil, false
+			}
+		case "Key":
+			if was.Key() != n.Key {
+				pc.Key = ptr.To(n.Key)
+			}
+		case "KeyExpiry":
+			if !was.KeyExpiry().Equal(n.KeyExpiry) {
+				pc.KeyExpiry = ptr.To(n.KeyExpiry)
+			}
+		case "KeySignature":
+			if !was.KeySignature().Equal(n.KeySignature) {
+				pc.KeySignature = slices.Clone(n.KeySignature)
+			}
+		case "Machine":
+			if was.Machine() != n.Machine {
+				return nil, false
+			}
+		case "DiscoKey":
+			if was.DiscoKey() != n.DiscoKey {
+				pc.DiscoKey = ptr.To(n.DiscoKey)
+			}
+		case "Addresses":
+			if !views.SliceEqual(was.Addresses(), views.SliceOf(n.Addresses)) {
+				return nil, false
+			}
+		case "AllowedIPs":
+			if !views.SliceEqual(was.AllowedIPs(), views.SliceOf(n.AllowedIPs)) {
+				return nil, false
+			}
+		case "Endpoints":
+			if !views.SliceEqual(was.Endpoints(), views.SliceOf(n.Endpoints)) {
+				pc.Endpoints = slices.Clone(n.Endpoints)
+			}
+		case "DERP":
+			if was.DERP() != n.DERP {
+				ip, portStr, err := net.SplitHostPort(n.DERP)
+				if err != nil || ip != "127.3.3.40" {
+					return nil, false
+				}
+				port, err := strconv.Atoi(portStr)
+				if err != nil || port < 1 || port > 65535 {
+					return nil, false
+				}
+				pc.DERPRegion = port
+			}
+		case "Hostinfo":
+			if !was.Hostinfo().Valid() && !n.Hostinfo.Valid() {
+				continue
+			}
+			if !was.Hostinfo().Valid() || !n.Hostinfo.Valid() {
+				return nil, false
+			}
+			if !was.Hostinfo().Equal(n.Hostinfo) {
+				return nil, false
+			}
+		case "Created":
+			if !was.Created().Equal(n.Created) {
+				return nil, false
+			}
+		case "Cap":
+			if was.Cap() != n.Cap {
+				pc.Cap = n.Cap
+			}
+		case "Tags":
+			if !views.SliceEqual(was.Tags(), views.SliceOf(n.Tags)) {
+				return nil, false
+			}
+		case "PrimaryRoutes":
+			if !views.SliceEqual(was.PrimaryRoutes(), views.SliceOf(n.PrimaryRoutes)) {
+				return nil, false
+			}
+		case "Online":
+			wasOnline := was.Online()
+			if n.Online != nil && wasOnline != nil && *n.Online != *wasOnline {
+				pc.Online = ptr.To(*n.Online)
+			}
+		case "LastSeen":
+			wasSeen := was.LastSeen()
+			if n.LastSeen != nil && wasSeen != nil && !wasSeen.Equal(*n.LastSeen) {
+				pc.LastSeen = ptr.To(*n.LastSeen)
+			}
+		case "MachineAuthorized":
+			if was.MachineAuthorized() != n.MachineAuthorized {
+				return nil, false
+			}
+		case "Capabilities":
+			if !views.SliceEqual(was.Capabilities(), views.SliceOf(n.Capabilities)) {
+				pc.Capabilities = ptr.To(n.Capabilities)
+			}
+		case "UnsignedPeerAPIOnly":
+			if was.UnsignedPeerAPIOnly() != n.UnsignedPeerAPIOnly {
+				return nil, false
+			}
+		case "IsWireGuardOnly":
+			if was.IsWireGuardOnly() != n.IsWireGuardOnly {
+				return nil, false
+			}
+		case "Expired":
+			if was.Expired() != n.Expired {
+				return nil, false
+			}
+		case "SelfNodeV4MasqAddrForThisPeer":
+			va, vb := was.SelfNodeV4MasqAddrForThisPeer(), n.SelfNodeV4MasqAddrForThisPeer
+			if va == nil && vb == nil {
+				continue
+			}
+			if va == nil || vb == nil || *va != *vb {
+				return nil, false
+			}
+		}
+	}
+	if reflect.ValueOf(&pc).Elem().IsZero() {
+		return nil, true
+	}
+	pc.NodeID = n.ID
+	return &pc, true
 }
 
 // netmap returns a fully populated NetworkMap from the last state seen from
