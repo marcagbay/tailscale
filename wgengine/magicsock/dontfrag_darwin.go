@@ -10,26 +10,36 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
+	"tailscale.com/types/logger"
 	"tailscale.com/types/nettype"
 )
 
-func setDontFragment(pconn nettype.PacketConn, network string) (err error) {
-	if c, ok := pconn.(*net.UDPConn); ok {
-		rc, err := c.SyscallConn()
-		if err == nil {
-			rc.Control(func(fd uintptr) {
-				if network == "udp4" {
-					err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, unix.IP_DONTFRAG, 1)
-				}
-				if network == "udp6" {
-					err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, unix.IPV6_DONTFRAG, 1)
-				}
-			})
-		}
+func setDontFragment(pconn nettype.PacketConn, network string, enable bool) (err error) {
+	value := 0
+	if enable {
+		value = 1
 	}
+	c, ok := pconn.(*net.UDPConn)
+	if !ok {
+		return nil
+	}
+	rc, err := c.SyscallConn()
+	if err != nil {
+		return err
+	}
+
+	rc.Control(func(fd uintptr) {
+		if network == "udp4" {
+			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, unix.IP_DONTFRAG, value)
+		}
+		if network == "udp6" {
+			err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, unix.IPV6_DONTFRAG, value)
+		}
+	})
+
 	return err
 }
 
-func CanPMTUD() bool {
-	return debugPMTUD() // only if the envknob is for now.
+func ShouldPMTUD(logf logger.Logf) bool {
+	return portableShouldPMTUD(logf)
 }

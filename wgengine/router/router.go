@@ -72,6 +72,9 @@ type Config struct {
 	// callback. If zero, the MTU is unchanged.
 	NewMTU int
 
+	// PeerMTU enables or disables path MTU discovery to peers.
+	PeerMTU bool
+
 	// Linux-only things below, ignored on other platforms.
 	SubnetRoutes     []netip.Prefix         // subnets being advertised to other Tailscale nodes
 	SNATSubnetRoutes bool                   // SNAT traffic to local subnets

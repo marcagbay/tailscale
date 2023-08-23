@@ -3081,6 +3081,8 @@ func (b *LocalBackend) authReconfig() {
 //
 // The versionOS is a Tailscale-style version ("iOS", "macOS") and not
 // a runtime.GOOS.
+//
+// XXX doesn't seem to use nm arg?
 func shouldUseOneCGNATRoute(nm *netmap.NetworkMap, logf logger.Logf, versionOS string) bool {
 	// Explicit enabling or disabling always take precedence.
 	if v, ok := controlclient.ControlOneCGNATSetting().Get(); ok {
@@ -3548,6 +3550,7 @@ func (b *LocalBackend) routerConfig(cfg *wgcfg.Config, prefs ipn.PrefsView, oneC
 		SNATSubnetRoutes: !prefs.NoSNAT(),
 		NetfilterMode:    prefs.NetfilterMode(),
 		Routes:           peerRoutes(b.logf, cfg.Peers, singleRouteThreshold),
+		PeerMTU:          magicsock.ShouldPMTUD(b.logf),
 	}
 
 	if distro.Get() == distro.Synology {

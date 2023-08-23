@@ -20,9 +20,9 @@ func debugAlwaysDERP() bool            { return false }
 func debugUseDERPHTTP() bool           { return false }
 func debugEnableSilentDisco() bool     { return false }
 func debugSendCallMeUnknownPeer() bool { return false }
-func debugPMTUD() bool                 { return false }
 func debugUseDERPAddr() string         { return "" }
 func debugUseDerpRouteEnv() string     { return "" }
 func debugUseDerpRoute() opt.Bool      { return "" }
+func debugPMTUD() opt.Bool             { return "" }
 func debugRingBufferMaxSizeBytes() int { return 0 }
 func inTest() bool                     { return false }

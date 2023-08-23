@@ -24,6 +24,7 @@ import (
 	"go4.org/mem"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
+	"tailscale.com/control/controlclient"
 	"tailscale.com/disco"
 	"tailscale.com/envknob"
 	"tailscale.com/health"
@@ -159,6 +160,10 @@ type Conn struct {
 
 	// port is the preferred port from opts.Port; 0 means auto.
 	port atomic.Uint32
+
+	// peerMTU is whether path MTU discovery is enabled.
+	// XXX does this need to be atomic?
+	peerMTU atomic.Bool
 
 	// stats maintains per-connection counters.
 	stats atomic.Pointer[connstats.Statistics]
@@ -408,6 +413,7 @@ func NewConn(opts Options) (*Conn, error) {
 		c.portMapper.SetGatewayLookupFunc(opts.NetMon.GatewayAndSelfIP)
 	}
 	c.netMon = opts.NetMon
+	c.peerMTU.Store(ShouldPMTUD(c.logf))
 
 	if err := c.rebind(keepCurrentPort); err != nil {
 		return nil, err
@@ -1650,6 +1656,20 @@ func (c *Conn) SetPreferredPort(port uint16) {
 	c.resetEndpointStates()
 }
 
+// SetPeerMTU enables or disables path MTU discovery on the conn's sockets.
+func (c *Conn) SetPeerMTU(new bool) {
+	if c.peerMTU.Load() == new {
+		return
+	}
+	c.peerMTU.Store(new)
+
+	if err := c.rebind(keepCurrentPort); err != nil {
+		c.logf("%w", err)
+		return
+	}
+	c.resetEndpointStates()
+}
+
 // SetPrivateKey sets the connection's private key.
 //
 // This is only used to be able prove our identity when connecting to
@@ -2220,10 +2240,13 @@ func (c *Conn) bindSocket(ruc *RebindingUDPConn, network string, curPortFate cur
 		}
 		trySetSocketBuffer(pconn, c.logf)
 
-		if CanPMTUD() {
-			err = setDontFragment(pconn, network)
+		if c.peerMTU.Load() {
+			if debugBindSocket() {
+				c.logf("magicsock: bindSocket: setting don't fragment on %v port %d", network, port)
+			}
+			err = setDontFragment(pconn, network, true)
 			if err != nil {
-				c.logf("magicsock: set dontfragment failed for %v port %d: %v", network, port, err)
+				c.logf("magicsock: set don't fragment failed for %v port %d: %v", network, port, err)
 				// TODO disable PMTUD in this case. We don't expect the setsockopt to fail on
 				// supported platforms, but we might as well be paranoid.
 			}
@@ -2619,6 +2642,31 @@ func portableTrySetSocketBuffer(pconn nettype.PacketConn, logf logger.Logf) {
 			logf("magicsock: failed to set UDP write buffer size to %d: %v", socketBufferSize, err)
 		}
 	}
+}
+
+// portableShouldPMTUD returns whether this client should do peer MTU discovery,
+// assuming it has the capability. The order is:
+//
+// - If set, the value of TS_DEBUG_ENABLE_PMTUD.
+// - If set, the value of the PMTUD node attribute from control.
+// - Otherwise, the default value.
+func portableShouldPMTUD(logf logger.Logf) bool {
+	if v, ok := debugPMTUD().Get(); ok {
+		if debugBindSocket() {
+			logf("magicsock: bindSocket: peer path MTU discovery set via envknob to %v", v)
+		}
+		return v
+	}
+	if v, ok := controlclient.ControlPeerMTUSetting().Get(); ok {
+		if debugBindSocket() {
+			logf("magicsock: bindSocket: peer path MTU discovery set by control to %v", v)
+		}
+		return v
+	}
+	if debugBindSocket() {
+		logf("magicsock: bindSocket: peer path MTU discovery set by default to false")
+	}
+	return false // Until we feel confident PMTUD is solid.
 }
 
 // derpStr replaces DERP IPs in s with "derp-".

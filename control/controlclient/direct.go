@@ -1309,6 +1309,7 @@ var (
 	controlKeepFullWGConfig    atomic.Bool
 	controlRandomizeClientPort atomic.Bool
 	controlOneCGNAT            syncs.AtomicValue[opt.Bool]
+	controlPeerMTU             syncs.AtomicValue[opt.Bool]
 )
 
 // DisableDRPO reports whether control says to disable the
@@ -1334,6 +1335,11 @@ func ControlOneCGNATSetting() opt.Bool {
 	return controlOneCGNAT.Load()
 }
 
+// ControlPeerMTUSetting returns control's PeerMTU setting, if any.
+func ControlPeerMTUSetting() opt.Bool {
+	return controlPeerMTU.Load()
+}
+
 func setControlKnobsFromNodeAttrs(selfNodeAttrs []string) {
 	var (
 		keepFullWG          bool
@@ -1341,6 +1347,7 @@ func setControlKnobsFromNodeAttrs(selfNodeAttrs []string) {
 		disableUPnP         bool
 		randomizeClientPort bool
 		oneCGNAT            opt.Bool
+		peerMTU             opt.Bool
 	)
 	for _, attr := range selfNodeAttrs {
 		switch attr {
@@ -1356,6 +1363,10 @@ func setControlKnobsFromNodeAttrs(selfNodeAttrs []string) {
 			oneCGNAT.Set(true)
 		case tailcfg.NodeAttrOneCGNATDisable:
 			oneCGNAT.Set(false)
+		case tailcfg.NodeAttrPeerMTUEnable:
+			peerMTU.Set(true)
+		case tailcfg.NodeAttrPeerMTUDisable:
+			peerMTU.Set(false)
 		}
 	}
 	controlKeepFullWGConfig.Store(keepFullWG)
@@ -1363,6 +1374,7 @@ func setControlKnobsFromNodeAttrs(selfNodeAttrs []string) {
 	controlknobs.SetDisableUPnP(disableUPnP)
 	controlRandomizeClientPort.Store(randomizeClientPort)
 	controlOneCGNAT.Store(oneCGNAT)
+	controlPeerMTU.Store(peerMTU)
 }
 
 // ipForwardingBroken reports whether the system's IP forwarding is disabled

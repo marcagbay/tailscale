@@ -867,6 +867,7 @@ func (e *userspaceEngine) Reconfig(cfg *wgcfg.Config, routerCfg *router.Config, 
 	}
 	e.magicConn.UpdatePeers(peerSet)
 	e.magicConn.SetPreferredPort(listenPort)
+	e.magicConn.SetPeerMTU(routerCfg.PeerMTU)
 
 	if err := e.maybeReconfigWireguardLocked(discoChanged); err != nil {
 		return err

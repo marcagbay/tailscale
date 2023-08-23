@@ -111,7 +111,8 @@ type CapabilityVersion int
 //   - 70: 2023-08-16: removed most Debug fields; added NodeAttrDisable*, NodeAttrDebug* instead
 //   - 71: 2023-08-17: added NodeAttrOneCGNATEnable, NodeAttrOneCGNATDisable
 //   - 72: 2023-08-23: TS-2023-006 UPnP issue fixed; UPnP can now be used again
-const CurrentCapabilityVersion CapabilityVersion = 72
+//   - 73: 2023-08-24: added NodeAttrPeerMTUEnable, NodeAttrPeerMTUDisable
+const CurrentCapabilityVersion CapabilityVersion = 73
 
 type StableID string
 
@@ -1984,6 +1985,16 @@ const (
 	// rather than one big /10 CGNAT route. At most one of this or
 	// NodeAttrOneCGNATEnable may be set; if neither are, it's automatic.
 	NodeAttrOneCGNATDisable = "one-cgnat?v=false"
+
+	// NodeAttrPeerMTUEnable makes the client do path MTU discovery to its
+	// peers. At most one of this or NodeAttrPeerMTUDisable may be set; if
+	// neither are, it's the client default.
+	NodeAttrPeerMTUEnable = "peer-mtu?v=true"
+
+	// NodeAttrPeerMTUDisable stops the client from using path MTU discovery
+	// to its peers. At most one of this or NodeAttrPeerMTUEnable may be
+	// set; if neither are, it's the client default.
+	NodeAttrPeerMTUDisable = "peer-mtu?v=false"
 )
 
 // SetDNSRequest is a request to add a DNS record.

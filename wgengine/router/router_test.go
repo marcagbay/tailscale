@@ -22,7 +22,7 @@ func mustCIDRs(ss ...string) []netip.Prefix {
 func TestConfigEqual(t *testing.T) {
 	testedFields := []string{
 		"LocalAddrs", "Routes", "LocalRoutes", "NewMTU",
-		"SubnetRoutes", "SNATSubnetRoutes", "NetfilterMode",
+		"PeerMTU", "SubnetRoutes", "SNATSubnetRoutes", "NetfilterMode",
 	}
 	configType := reflect.TypeOf(Config{})
 	configFields := []string{}
