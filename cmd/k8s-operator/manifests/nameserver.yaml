@@ -1,3 +1,9 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nameserver
+  namespace: tailscale
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -38,12 +44,6 @@ spec:
       - name: dnsconfig
         configMap:
           name: dnsconfig
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: nameserver 
-  namespace: tailscale
 ---
 apiVersion: v1
 kind: Service

@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/transport"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -39,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 	"tailscale.com/client/tailscale"
+	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/hostinfo"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/store/kubestore"
@@ -47,6 +50,13 @@ import (
 	"tailscale.com/types/opt"
 	"tailscale.com/util/dnsname"
 	"tailscale.com/version"
+)
+
+const (
+	dnsConfigKey     = "dns.json"
+	dnsConfigMapName = "dnsconfig"
+
+	tsNetNSService = "nameserver"
 )
 
 func main() {
@@ -186,12 +196,30 @@ waitOnline:
 	nsFilter := cache.ByObject{
 		Field: client.InNamespace(tsNamespace).AsSelector(),
 	}
+
+	tsNSCMName := cache.ByObject{
+		Field: fields.SelectorFromSet(fields.Set{"metadata.name": dnsConfigMapName}),
+	}
+
+	// build cache filter for ConfigMaps. We only want to watch the one that
+	// holds ts.net nameserver config + the ones that might hold cluster DNS
+	// config
+	cmFilter := cache.ByObject{
+		Namespaces: map[string]cache.Config{
+			tsNamespace: {
+				FieldSelector: tsNSCMName.Field,
+			},
+			defaultClusterDNSNamespace: {}, // it doesn't seem like we can OR a field selector so cache all configmaps in this namespace
+		},
+	}
+
 	restConfig := config.GetConfigOrDie()
 	mgr, err := manager.New(restConfig, manager.Options{
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
 				&corev1.Secret{}:      nsFilter,
 				&appsv1.StatefulSet{}: nsFilter,
+				&corev1.ConfigMap{}:   cmFilter,
 			},
 		},
 	})
@@ -202,11 +230,12 @@ waitOnline:
 	sr := &ServiceReconciler{
 		Client:                 mgr.GetClient(),
 		tsClient:               tsClient,
+		localClient:            lc,
 		defaultTags:            strings.Split(tags, ","),
 		operatorNamespace:      tsNamespace,
 		proxyImage:             image,
 		proxyPriorityClassName: priorityClassName,
-		logger:                 zlog.Named("service-reconciler"),
+		logger:                 zlog.Named("proxy-reconciler"),
 	}
 
 	reconcileFilter := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, o client.Object) []reconcile.Request {
@@ -226,14 +255,79 @@ waitOnline:
 			},
 		}
 	})
+
+	cmEventHandler := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, o client.Object) []reconcile.Request {
+		// currently we cache the hosts configmap, but do not trigger
+		// reconciles if it has changed so any manual modifications to
+		// it will not always be immediately overriden. Probably
+		// eventually we want to do that- but make sure our reconciles
+		// are not too expensive first
+		return nil
+	})
+
 	err = builder.
 		ControllerManagedBy(mgr).
 		For(&corev1.Service{}).
 		Watches(&appsv1.StatefulSet{}, reconcileFilter).
 		Watches(&corev1.Secret{}, reconcileFilter).
+		Watches(&corev1.ConfigMap{}, cmEventHandler).
 		Complete(sr)
 	if err != nil {
-		startlog.Fatalf("could not create controller: %v", err)
+		startlog.Fatalf("could not create proxy reconciler: %v", err)
+	}
+
+	dnsR := &dnsReconciler{
+		Client:            mgr.GetClient(),
+		logger:            zlog.Named("dns-reconciler"),
+		operatorNamespace: tsNamespace,
+	}
+
+	// the only Service that dnsReconciler is interested in is that of the
+	// ts.net nameserver
+	dnsReconcilerSvcFilter := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, o client.Object) []reconcile.Request {
+		if o.GetName() != tsNetNSService || o.GetNamespace() != tsNamespace {
+			return nil
+		}
+		return []reconcile.Request{
+			{
+				NamespacedName: types.NamespacedName{
+					Namespace: tsNamespace,
+					Name:      tsNetNSService,
+				},
+			},
+		}
+	})
+
+	// the only configmaps that the dnsReconciler is interested in are those
+	// that hold kube-dns/CoreDNS configuration
+	dnsReconcilerCMFilter := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, o client.Object) []reconcile.Request {
+		if o.GetNamespace() != defaultClusterDNSNamespace {
+			return nil
+		}
+
+		for _, name := range append(knownKubeDNSConfigMapNames, knownCoreDNSConfigMapNames...) {
+			if name == o.GetName() {
+				return []reconcile.Request{
+					{
+						NamespacedName: types.NamespacedName{
+							Namespace: tsNamespace,
+							Name:      tsNetNSService,
+						},
+					},
+				}
+			}
+		}
+		return nil
+	})
+
+	err = builder.
+		ControllerManagedBy(mgr).
+		Named("dnsreconciler").
+		Watches(&corev1.Service{}, dnsReconcilerSvcFilter).
+		Watches(&corev1.ConfigMap{}, dnsReconcilerCMFilter).
+		Complete(dnsR)
+	if err != nil {
+		startlog.Fatalf("could not create dns reconciler: %v", err)
 	}
 
 	startlog.Infof("Startup complete, operator running, version: %s", version.Long())
@@ -282,6 +376,7 @@ const (
 type ServiceReconciler struct {
 	client.Client
 	tsClient               tsClient
+	localClient            localClient
 	defaultTags            []string
 	operatorNamespace      string
 	proxyImage             string
@@ -292,6 +387,10 @@ type ServiceReconciler struct {
 type tsClient interface {
 	CreateKey(ctx context.Context, caps tailscale.KeyCapabilities) (string, *tailscale.Key, error)
 	DeleteDevice(ctx context.Context, id string) error
+}
+
+type localClient interface {
+	WhoIs(ctx context.Context, remoteAddr string) (*apitype.WhoIsResponse, error)
 }
 
 func childResourceLabels(parent *corev1.Service) map[string]string {
@@ -341,6 +440,8 @@ func (a *ServiceReconciler) maybeCleanup(ctx context.Context, logger *zap.Sugare
 		logger.Debugf("no finalizer, nothing to do")
 		return nil
 	}
+
+	// TODO (irbekrm): delete record from ts.net nameserver configmap
 
 	ml := childResourceLabels(svc)
 
@@ -428,8 +529,9 @@ func (a *ServiceReconciler) maybeProvision(ctx context.Context, logger *zap.Suga
 		}
 	}
 
-	// Do full reconcile.
-	hsvc, err := a.reconcileHeadlessService(ctx, logger, svc)
+	// Create either headless or ClusterIP service depending on whether
+	// we are provisioning for ingress or egress
+	proxySvc, err := a.reconcileProxyService(ctx, logger, svc)
 	if err != nil {
 		return fmt.Errorf("failed to reconcile headless service: %w", err)
 	}
@@ -438,26 +540,18 @@ func (a *ServiceReconciler) maybeProvision(ctx context.Context, logger *zap.Suga
 	if tstr, ok := svc.Annotations[AnnotationTags]; ok {
 		tags = strings.Split(tstr, ",")
 	}
-	secretName, err := a.createOrGetSecret(ctx, logger, svc, hsvc, tags)
+	secretName, err := a.createOrGetSecret(ctx, logger, svc, proxySvc, tags)
 	if err != nil {
 		return fmt.Errorf("failed to create or get API key secret: %w", err)
 	}
-	_, err = a.reconcileSTS(ctx, logger, svc, hsvc, secretName, hostname)
+	_, err = a.reconcileSTS(ctx, logger, svc, proxySvc, secretName, hostname)
 	if err != nil {
 		return fmt.Errorf("failed to reconcile statefulset: %w", err)
 	}
 
-	if a.hasTargetAnnotation(svc) {
-		headlessSvcName := hsvc.Name + "." + hsvc.Namespace + ".svc"
-		if svc.Spec.ExternalName != headlessSvcName || svc.Spec.Type != corev1.ServiceTypeExternalName {
-			svc.Spec.ExternalName = headlessSvcName
-			svc.Spec.Selector = nil
-			svc.Spec.Type = corev1.ServiceTypeExternalName
-			if err := a.Update(ctx, svc); err != nil {
-				return fmt.Errorf("failed to update service: %w", err)
-			}
-		}
-		return nil
+	if err := a.reconcileDNSConfig(ctx, logger, svc); err != nil {
+		logger.Errorf("error reconciling DNS config: %v", err)
+		return err
 	}
 
 	if !a.hasLoadBalancerClass(svc) {
@@ -516,22 +610,120 @@ func (a *ServiceReconciler) hasTargetAnnotation(svc *corev1.Service) bool {
 	return svc != nil && svc.Annotations[AnnotationTargetIP] != ""
 }
 
-func (a *ServiceReconciler) reconcileHeadlessService(ctx context.Context, logger *zap.SugaredLogger, svc *corev1.Service) (*corev1.Service, error) {
-	hsvc := &corev1.Service{
+func (a *ServiceReconciler) reconcileProxyService(ctx context.Context, logger *zap.SugaredLogger, svc *corev1.Service) (*corev1.Service, error) {
+	proxySvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "ts-" + svc.Name + "-",
 			Namespace:    a.operatorNamespace,
 			Labels:       childResourceLabels(svc),
 		},
 		Spec: corev1.ServiceSpec{
-			ClusterIP: "None",
 			Selector: map[string]string{
 				"app": string(svc.UID),
 			},
 		},
 	}
-	logger.Debugf("reconciling headless service for StatefulSet")
-	return createOrUpdate(ctx, a.Client, a.operatorNamespace, hsvc, func(svc *corev1.Service) { svc.Spec = hsvc.Spec })
+	if a.hasTargetAnnotation(svc) {
+		logger.Debugf("reconciling headless service for egress proxy StatefulSet")
+		proxySvc.Spec.Type = "ClusterIP"
+		proxySvc.Spec.Ports = []corev1.ServicePort{{Name: "http", Protocol: "TCP", Port: 80}, {Name: "https", Protocol: "TCP", Port: 443}}
+
+	}
+	if a.shouldExpose(svc) {
+		logger.Debugf("reconciling ClusterIP service for ingress proxy StatefulSet")
+		proxySvc.Spec.ClusterIP = "None"
+	}
+	return createOrUpdate(ctx, a.Client, a.operatorNamespace, proxySvc, func(svc *corev1.Service) { svc.Spec = proxySvc.Spec })
+}
+
+func (a *ServiceReconciler) reconcileDNSConfig(ctx context.Context, logger *zap.SugaredLogger, svc *corev1.Service) error {
+
+	if !a.hasTargetAnnotation(svc) {
+		// only do this for services that define an egress proxy
+		return nil
+	}
+	ip := fmt.Sprintf("%s:0", svc.Annotations[AnnotationTargetIP])
+	ar, err := a.localClient.WhoIs(ctx, ip)
+	if err != nil {
+		logger.Errorf("error identifying Tailscale service for %s: %v", ip, err)
+		return err
+	}
+	// This should never be empty
+	fqdn := ar.Node.Name
+
+	logger.Debugf("ensuring a record for %s to hosts config...", fqdn)
+
+	// Check if proxy Service already has been created and has a Cluster IP
+	// assigned to it
+	ml := childResourceLabels(svc)
+	proxySvc, err := getSingleObject[corev1.Service](ctx, a.Client, a.operatorNamespace, ml)
+	if apierrors.IsNotFound(err) {
+		// we will reconcile again on proxy Service creation/update
+		// event and the hosts config will get updated then
+		logger.Debugf("proxy Service not yet created waiting...")
+		return nil
+	}
+	if err != nil {
+		logger.Errorf("error retrieving proxy Service: %v", err)
+		return err
+	}
+
+	if proxySvc == nil || proxySvc.Spec.ClusterIP == "" || proxySvc.Spec.ClusterIP == "None" {
+		// we will reconcile again on proxy Service creation/update
+		// event and the hosts config will get updated then
+		logger.Infof("proxy Service for %s not yet ready, waiting...", fqdn)
+		return nil
+	}
+
+	cm := &corev1.ConfigMap{}
+	err = a.Get(ctx, types.NamespacedName{Name: dnsConfigMapName, Namespace: a.operatorNamespace}, cm)
+	if err != nil {
+		logger.Errorf("error retrieving hosts config: %v", err)
+		return err
+	}
+
+	hosts := make(map[string]string)
+	if cm.Data[dnsConfigKey] != "" {
+		if err := json.Unmarshal([]byte(cm.Data[dnsConfigKey]), &hosts); err != nil {
+			logger.Errorf("error unmarshaling hosts config %v", err)
+			return err
+		}
+	}
+	hosts[fqdn] = proxySvc.Spec.ClusterIP
+	hostsBytes, err := json.Marshal(hosts)
+	if err != nil {
+		logger.Errorf("error marshaling hosts config %v", err)
+		return err
+	}
+
+	cm.Data[dnsConfigKey] = string(hostsBytes)
+
+	// TODO (irbekrm): probably better to SSA here
+	// TODO (irbekrm): check diff only apply update if needed
+	if err := a.Update(ctx, cm); err != nil {
+		logger.Errorf("failed to update ts.net DNS config: %v", err)
+		return err
+	}
+
+	// TODO (irbekrm): run some kind of test here to ensure that the service
+	// can actually be reached from cluster - i.e spin up a pod and try to
+	// curl the service
+
+	// If we get to this point we've done all we are currently doing in code
+	// to set up DNS, so let's update spec.ExternaName of the user's Service
+	// with Tailscale service FQDN. This is not required for things to work,
+	// but is a pointer that users should use this FQDN to refer to the
+	// Tailscale service from their cluster workloads.
+	if svc.Spec.ExternalName != fqdn || svc.Spec.Type != corev1.ServiceTypeExternalName {
+		logger.Debugf("updating service %s/%s to external Service pointing at Tailscale service FQDN", svc.Name, svc.Namespace)
+		svc.Spec.ExternalName = fqdn
+		svc.Spec.Type = corev1.ServiceTypeExternalName
+		if err := a.Update(ctx, svc); err != nil {
+			logger.Errorf("error updating Service %s: %v", svc.Name, err)
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *ServiceReconciler) createOrGetSecret(ctx context.Context, logger *zap.SugaredLogger, svc, hsvc *corev1.Service, tags []string) (string, error) {
