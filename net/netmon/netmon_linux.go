@@ -209,7 +209,7 @@ func (c *nlConn) Receive() (message, error) {
 		return ignoreMessage{}, nil
 	case unix.RTM_DELRULE:
 		// For https://github.com/tailscale/tailscale/issues/1591 where
-		// systemd-networkd deletes our rules.
+		// systemd-networkd deletes our rules.q
 		var rmsg rtnetlink.RouteMessage
 		err := rmsg.UnmarshalBinary(msg.Data)
 		if err != nil {
