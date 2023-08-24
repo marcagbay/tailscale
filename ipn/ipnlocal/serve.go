@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go4.org/mem"
 	"tailscale.com/ipn"
 	"tailscale.com/logtail/backoff"
 	"tailscale.com/net/netutil"
@@ -236,17 +237,19 @@ func (b *LocalBackend) SetServeConfig(config *ipn.ServeConfig) error {
 
 	var bs []byte
 	if config != nil {
-		j, err := json.Marshal(config)
+		var err error
+		bs, err = json.Marshal(config.StripEphemeral())
 		if err != nil {
 			return fmt.Errorf("encoding serve config: %w", err)
 		}
-		bs = j
+		b.serveConfig = config.View()
+		b.lastServeConfJSON = mem.B(bs)
 	}
 	if err := b.store.WriteState(confKey, bs); err != nil {
 		return fmt.Errorf("writing ServeConfig to StateStore: %w", err)
 	}
 
-	b.setTCPPortsInterceptedFromNetmapAndPrefsLocked(b.pm.CurrentPrefs())
+	b.setTCPPortsInterceptedFromNetmapAndPrefsLocked(b.pm.CurrentPrefs(), false)
 	return nil
 }
 
@@ -339,7 +342,8 @@ func setHandler(sc *ipn.ServeConfig, req ipn.ServeStreamRequest) {
 	}
 	if _, ok := sc.TCP[443]; !ok {
 		sc.TCP[443] = &ipn.TCPPortHandler{
-			HTTPS: true,
+			HTTPS:     true,
+			Ephemeral: true,
 		}
 	}
 	if sc.Web == nil {

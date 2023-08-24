@@ -6,6 +6,7 @@ package ipn
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"net/url"
@@ -37,6 +38,27 @@ type ServeConfig struct {
 	// AllowFunnel is the set of SNI:port values for which funnel
 	// traffic is allowed, from trusted ingress peers.
 	AllowFunnel map[HostPort]bool `json:",omitempty"`
+}
+
+// StripEphemeral returns a copy of the ServeConfig that ensures
+// that ephemeral TCP connections stay in memory only by removing
+// both TCP and web handlers where the Ephemeral field is set to true.
+func (s *ServeConfig) StripEphemeral() *ServeConfig {
+	conf := s.Clone()
+	maps.DeleteFunc(conf.Web, func(hp HostPort, wsc *WebServerConfig) bool {
+		p, _ := hp.Port()
+		tcpHandler := conf.TCP[p]
+		return tcpHandler != nil && tcpHandler.Ephemeral
+	})
+	maps.DeleteFunc(conf.AllowFunnel, func(hp HostPort, b bool) bool {
+		p, _ := hp.Port()
+		tcpHandler := conf.TCP[p]
+		return tcpHandler != nil && tcpHandler.Ephemeral
+	})
+	maps.DeleteFunc(conf.TCP, func(u uint16, th *TCPPortHandler) bool {
+		return th.Ephemeral
+	})
+	return conf
 }
 
 // HostPort is an SNI name and port number, joined by a colon.
@@ -146,6 +168,12 @@ type TCPPortHandler struct {
 	// SNI name with this value. It is only used if TCPForward is non-empty.
 	// (the HTTPS mode uses ServeConfig.Web)
 	TerminateTLS string `json:",omitempty"`
+
+	// Ephemeral indicates this TCPPort handler lives only in-memory
+	// and is not persisted across LocalBackend restarts. This ensures
+	// that ungracefully terminated foreground serves/funnels don't
+	// linger.
+	Ephemeral bool `json:",omitempty"`
 }
 
 // HTTPHandler is either a path or a proxy to serve.

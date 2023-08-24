@@ -102,6 +102,7 @@ var _TCPPortHandlerCloneNeedsRegeneration = TCPPortHandler(struct {
 	HTTP         bool
 	TCPForward   string
 	TerminateTLS string
+	Ephemeral    bool
 }{})
 
 // Clone makes a deep copy of HTTPHandler.
