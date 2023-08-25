@@ -14,6 +14,7 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
@@ -24,12 +25,14 @@ import (
 
 	"github.com/gorilla/csrf"
 	"tailscale.com/client/tailscale"
+	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/licenses"
 	"tailscale.com/net/netutil"
 	"tailscale.com/tailcfg"
+	"tailscale.com/types/netmap"
 	"tailscale.com/util/httpm"
 	"tailscale.com/version/distro"
 )
@@ -246,8 +249,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-CSRF-Token", csrf.Token(r))
 	path := strings.TrimPrefix(r.URL.Path, "/api")
-	switch path {
-	case "/data":
+	switch {
+	case path == "/data":
 		switch r.Method {
 		case httpm.GET:
 			s.serveGetNodeDataJSON(w, r)
@@ -256,6 +259,9 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+		return
+	case strings.HasPrefix(path, "/local/"):
+		s.proxyRequestToLocalAPI(w, r)
 		return
 	}
 	http.Error(w, "invalid endpoint", http.StatusNotFound)
@@ -471,6 +477,74 @@ func (s *Server) tailscaleUp(ctx context.Context, st *ipnstate.Status, postData 
 		if url := n.BrowseToURL; url != nil && printAuthURL(*url) {
 			return *url, nil
 		}
+	}
+}
+
+// proxyRequestToLocalAPI proxies the web API request to the localapi.
+//
+// The web API request path is expected to exactly match a localapi path,
+// with prefix /api/local/ rather than /localapi/.
+//
+// If the request comes from a host other than the node itself,
+// the request is rejected.
+func (s *Server) proxyRequestToLocalAPI(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/local/")
+	if r.URL.Path == path { // missing prefix
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// First, we verify that the request came from the node's web client
+	// frontend, and not from some other source. We do this by checking
+	// that the request host matches the known names for the self node.
+
+	s.selfMu.Lock()
+	self := s.self
+	s.selfMu.Unlock()
+	if !self.Valid() {
+		// If there's no node logged in, reject all localapi proxy requests.
+		//
+		// Login requests are handled outside of the localapi proxy from the
+		// Server.tailscaleUp handler, so we should always have a valid node
+		// when using the localapi proxy.
+		http.Error(w, "no authenticated node", http.StatusForbidden)
+		return
+	}
+
+	dnsSuffix := netmap.MagicDNSSuffixOfNodeName(self.Name())
+	nodeFQDN := strings.TrimSuffix(self.Name(), ".")           // node.tailnet.ts.net
+	nodeName := strings.TrimSuffix(self.Name(), "."+dnsSuffix) // without tailnet suffix
+
+	requestHost, _, _ := net.SplitHostPort(r.Host)
+	switch requestHost {
+	case nodeFQDN, nodeName, self.Hostinfo().Hostname(), "localhost", "127.0.0.1":
+		// TODO: check self.addresses as well (incase they access using IP)
+		break // request host is a known name for this node
+	default:
+		http.Error(w, fmt.Sprintf("request from unknown host %q", requestHost), http.StatusForbidden)
+		return
+	}
+
+	localAPIURL := "http://" + apitype.LocalAPIHost + "/localapi/" + path
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, localAPIURL, r.Body)
+	if err != nil {
+		http.Error(w, "failed to construct request", http.StatusInternalServerError)
+		return
+	}
+
+	// Make request to tailscaled localapi.
+	resp, err := s.lc.DoLocalRequest(req)
+	if err != nil {
+		http.Error(w, err.Error(), resp.StatusCode)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Send response back to web frontend.
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 

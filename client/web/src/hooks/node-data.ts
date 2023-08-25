@@ -35,7 +35,7 @@ export default function useNodeData() {
   const [data, setData] = useState<NodeData>()
   const [isPosting, setIsPosting] = useState<boolean>(false)
 
-  const fetchNodeData = useCallback(() => {
+  const refreshData = useCallback(() => {
     apiFetch("api/data")
       .then((r) => r.json())
       .then((d) => setData(d))
@@ -106,7 +106,7 @@ export default function useNodeData() {
           if (url) {
             window.open(url, "_blank")
           }
-          fetchNodeData()
+          refreshData()
         })
         .catch((err) => alert("Failed operation: " + err.message))
     },
@@ -116,11 +116,11 @@ export default function useNodeData() {
   useEffect(
     () => {
       // Initial data load.
-      fetchNodeData()
+      refreshData()
 
       // Refresh on browser tab focus.
       const onVisibilityChange = () => {
-        document.visibilityState === "visible" && fetchNodeData()
+        document.visibilityState === "visible" && refreshData()
       }
       window.addEventListener("visibilitychange", onVisibilityChange)
       return () => {
@@ -132,5 +132,5 @@ export default function useNodeData() {
     []
   )
 
-  return { data, updateNode, isPosting }
+  return { data, refreshData, updateNode, isPosting }
 }

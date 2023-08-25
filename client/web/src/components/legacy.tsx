@@ -1,5 +1,6 @@
 import cx from "classnames"
 import React from "react"
+import { apiFetch } from "src/api"
 import { NodeData, NodeUpdate } from "src/hooks/node-data"
 
 // TODO(tailscale/corp#13775): legacy.tsx contains a set of components
@@ -9,9 +10,11 @@ import { NodeData, NodeUpdate } from "src/hooks/node-data"
 
 export function Header({
   data,
+  refreshData,
   updateNode,
 }: {
   data: NodeData
+  refreshData: () => void
   updateNode: (update: NodeUpdate) => void
 }) {
   return (
@@ -89,7 +92,14 @@ export function Header({
                   </button>{" "}
                   |{" "}
                   <button
-                    onClick={() => updateNode({ ForceLogout: true })}
+                    onClick={() =>
+                      // TODO(sonia): move into some shared localapi call helper
+                      apiFetch("/api/local/v0/logout", { method: "POST" })
+                        .then(refreshData)
+                        .catch((err) =>
+                          alert("Failed operation: " + err.message)
+                        )
+                    }
                     className="hover:text-gray-700"
                   >
                     Logout
