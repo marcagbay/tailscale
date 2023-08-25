@@ -389,19 +389,21 @@ func deleteHandler(sc *ipn.ServeConfig, req ipn.ServeStreamRequest, port uint16)
 	}
 }
 
-func (b *LocalBackend) maybeLogServeConnection(destPort uint16, srcAddr netip.AddrPort) {
+func (b *LocalBackend) maybeLogServeConnection(c *serveHTTPContext, r *http.Request) {
 	b.mu.Lock()
-	streamers := b.serveStreamers[destPort]
+	streamers := b.serveStreamers[c.DestPort]
 	b.mu.Unlock()
 	if len(streamers) == 0 {
 		return
 	}
 
 	var log ipn.FunnelRequestLog
-	log.SrcAddr = srcAddr
+	log.SrcAddr = c.SrcAddr
 	log.Time = b.clock.Now()
+	log.Method = r.Method
+	log.Path = r.URL.Path
 
-	if node, user, ok := b.WhoIs(srcAddr); ok {
+	if node, user, ok := b.WhoIs(c.SrcAddr); ok {
 		log.NodeName = node.ComputedName()
 		if node.IsTagged() {
 			log.NodeTags = node.Tags().AsSlice()
@@ -518,7 +520,7 @@ func (b *LocalBackend) tcpHandlerForServe(dport uint16, srcAddr netip.AddrPort) 
 	if backDst := tcph.TCPForward(); backDst != "" {
 		return func(conn net.Conn) error {
 			defer conn.Close()
-			b.maybeLogServeConnection(dport, srcAddr)
+			// b.maybeLogServeConnection(dport, srcAddr)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			backConn, err := b.dialer.SystemDial(ctx, "tcp", backDst)
 			cancel()
@@ -688,7 +690,7 @@ func (b *LocalBackend) serveWebHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if c, ok := getServeHTTPContext(r); ok {
-		b.maybeLogServeConnection(c.DestPort, c.SrcAddr)
+		b.maybeLogServeConnection(c, r)
 	}
 	if s := h.Text(); s != "" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
