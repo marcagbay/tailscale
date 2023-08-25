@@ -16,6 +16,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -101,6 +102,10 @@ func main() {
 		go s.serve(ln)
 	}
 
+	ssh_dest := os.Getenv("APPC_SSH_DEST")
+	if ssh_dest != "" {
+		*forwards = strings.Join([]string{*forwards, "tcp/22/" + ssh_dest}, ",")
+	}
 	for _, forwStr := range strings.Split(*forwards, ",") {
 		if forwStr == "" {
 			continue
@@ -126,7 +131,6 @@ func main() {
 		})
 
 		go s.forward(ln, forw)
-
 	}
 
 	ln, err := s.ts.Listen("udp", ":53")
